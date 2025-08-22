@@ -11,3 +11,7 @@ c = np.mean(Y) - m * np.mean(X)
 print("Slope (m):", m)
 print("Intercept (c):", c)
 print("Prediction for x=6:", m*6 + c)
+#output
+#Slope (m): 3.0
+#Intercept (c): 2.0
+#Prediction for x=6: 20.0
