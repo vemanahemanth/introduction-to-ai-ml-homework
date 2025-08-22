@@ -12,3 +12,7 @@ else:
     grade = "F"
 
 print("Grade", grade)
+
+#output
+# input = 66
+# Grade C
