@@ -1,17 +1,13 @@
-import numpy as np
+import tensorflow as tf
 
+X = tf.constant([1., 2., 3., 4., 5.])
+Y = tf.constant([5., 8., 11., 14., 17.])
 
-X = np.array([1, 2, 3, 4, 5], dtype=float)
-Y = np.array([5, 8, 11, 14, 17], dtype=float)
+m = tf.reduce_mean((X - tf.reduce_mean(X)) * (Y - tf.reduce_mean(Y))) / tf.math.reduce_variance(X)
+c = tf.reduce_mean(Y) - m * tf.reduce_mean(X)
 
+prediction = m * 6 + c
 
-m = np.cov(X, Y, bias=True)[0][1] / np.var(X)
-c = np.mean(Y) - m * np.mean(X)
-
-print("Slope (m):", m)
-print("Intercept (c):", c)
-print("Prediction for x=6:", m*6 + c)
-#output
-#Slope (m): 3.0
-#Intercept (c): 2.0
-#Prediction for x=6: 20.0
+print("Slope (m):", m.numpy())
+print("Intercept (c):", c.numpy())
+print("Prediction for x=6:", prediction.numpy())
