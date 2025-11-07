@@ -1,0 +1,399 @@
+Great — below is a complete, production-style application plan for your FIFA 2026 Finalist Predictor using LightGBM as the core model. It’s written as an implementation-ready spec you can hand to teammates, include in your repo, or present to Shivaprasad Sir. I include:
+	•	precise data & API choices (with citations)
+	•	feature / schema definitions
+	•	full ML pipeline (preprocessing, CV, hyperparameter ranges)
+	•	every evaluation metric (definitions, when to use, thresholds)
+	•	model explainability and calibration steps
+	•	app architecture & UI elements (field-level details for each tab you asked)
+	•	reliability, monitoring, testing, and deliverables
+
+I cite the most important external resources I used below (APIs & metric guides). Let’s dive in.
+
+⸻
+
+1 — Data sources & ingestion (real, free)
+
+Primary data sources (use these first; fallback to others as needed):
+	•	API-Football (api-sports) — live fixtures, teams, lineups, events; free plan available. Use for dynamic fixtures & qualifiers.  ￼
+	•	football-data.co.uk — historical match results and betting odds CSVs (bulk training data). Excellent reliable free historical dataset.  ￼
+	•	FBref / Understat / Transfermarkt — scrape for advanced features (xG, player market value, squad lists). Respect robots.txt and TOS.
+	•	SportMonks — optional free tier for additional coverage.  ￼
+
+Why these: API-Football & football-data.co.uk provide the live + historical backbone for predictions and simulations; FBref/Understat add depth (xG, advanced metrics), and bookmakers’ odds from football-data.co.uk provide strong predictive signals.
+
+⸻
+
+2 — Data model, schema & storage
+
+Team-level master table (teams)
+	•	team_id (canonical UUID)
+	•	fifa_id / api_team_id
+	•	name, iso2, confederation (e.g., UEFA, CONMEBOL)
+	•	country_code, flag_url
+	•	fifa_rank (latest)
+	•	active (bool — currently qualified or selected in candidate 48)
+	•	last_updated (timestamp)
+
+Match/Fixture table (fixtures)
+	•	fixture_id, date_utc (ISO), local_date, competition, season
+	•	home_team_id, away_team_id
+	•	venue, city, country
+	•	home_score, away_score, status (scheduled/live/finished)
+	•	odds_home, odds_draw, odds_away (if available)
+	•	weather_summary, temp_c, humidity (optional from Weather API)
+
+Per-team-per-timestamp features table (team_features_snapshot)
+	•	snapshot_id, team_id, snapshot_date
+	•	numeric features: avg_goals_for_90, avg_goals_against_90, xg_for_90, xg_against_90, shots_per_90, sot_per_90, possession_pct, pass_accuracy, clean_sheet_pct, win_rate_last5, points_per_game, elo_rating (if computed), squad_value_eur, avg_age, injuries_count, travel_distance_avg_km
+	•	categorical/context features: confederation, home_advantage_factor
+	•	label: reached_final (0/1) — used for training historical tournaments
+
+Store raw/ JSONs and processed/ Parquet/CSV. Use SQLite for prototype; Postgres for team.
+
+⸻
+
+3 — Feature engineering (concrete features — aim for ~80–120)
+
+Group + exact formula examples:
+	1.	Recent form / rolling features
+	•	win_rate_last5 = wins(last 5 matches) / 5
+	•	points_per_game_12m = total points earned in last 12 months / matches_played
+	2.	Goals & xG
+	•	avg_goals_for_90_last20 = (goals_for in last 20 matches) / (minutes_played/90)
+	•	avg_xg_for_90 and avg_xg_against_90 (if scraping Understat/FBref)
+	3.	Shooting & chance creation
+	•	shots_per_90, shots_on_target_per_90, conversion_rate = goals / shots
+	4.	Defense & keeper
+	•	clean_sheet_pct = clean_sheets / matches
+	•	goals_conceded_per_90
+	5.	Possession & passing
+	•	avg_possession_pct, passes_per_90, progressive_passes_per_90
+	6.	Squad features
+	•	squad_value_million_eur (sum of player market values)
+	•	pct_players_top5_leagues (players playing in top 5 European leagues)
+	•	avg_player_caps (international experience)
+	7.	Contextual
+	•	days_rest_avg before tournament start
+	•	travel_distance_km (approx from capital-to-venue)
+	•	climate_factor (binary flag if team used to similar climate — e.g., hot/humid)
+	8.	Market signals
+	•	implied_prob_bookmakers = normalize(1/odds) (use closing odds from football-data.co.uk)
+	•	betting_market_volatility (std of implied probabilities across bookies)
+	9.	Ranking/Elo
+	•	fifa_rank (raw) and elo_rating (if computed)
+	10.	Derived / interaction
+
+	•	attack_minus_defense = avg_xg_for_90 - avg_xg_against_90
+	•	experience_index = weighted sum of caps * minutes (normalize)
+
+Feature storage: Save feature list and generation code in etl/transform_features.py and create a features_catalog.md.
+
+⸻
+
+4 — Labeling & problem framing
+	•	Primary target (what you’ll train on): reached_final for each team in a tournament (binary). Use historical World Cups / continental tournaments to generate labels (team reached final = 1).
+	•	Alternative: train a match-level model (predict match outcome probabilities) and then simulate entire tournament using Monte Carlo. This tends to be more flexible & realistic for tournament forecasting.
+
+Pick one approach; I recommend match-level model + simulation (better uses match-level historical data and odds), but you can also train team-level finalist models directly. Both are supported by plan.
+
+⸻
+
+5 — Modeling pipeline (LightGBM) — reproducible steps
+
+A. Preprocessing pipeline
+	•	Train/test split
+	•	Use GroupKFold grouped by tournament_year (or tournament) to avoid leakage across tournament contexts.
+	•	If using match-level model, use time-aware split: train on tournaments before year X, validate on later tournaments.
+	•	Imputation
+	•	Numeric: median; add is_missing_* flags for important features.
+	•	Categorical: mode or new category unknown.
+	•	Encoding
+	•	Small-cardinality categorical: OneHotEncoder
+	•	Larger: Target/Leave-one-out encoding with smoothing (k-fold within training to avoid leakage)
+	•	Scaling
+	•	Not required for LightGBM, but required for Logistic Regression baseline (StandardScaler)
+	•	Feature selection
+	•	Remove features with >60% missing
+	•	Remove multicollinearity: drop features with VIF > 10 or keep one of correlated pairs (|corr|>0.9)
+	•	Use recursive feature elimination or LightGBM feature importance permutation to pick top ~40 features
+
+B. LightGBM training (recommended config)
+	•	Use scikit-learn API or native lightgbm.train. Example params to start:
+
+params = {
+ 'objective': 'binary',
+ 'metric': ['auc'],
+ 'boosting_type': 'gbdt',
+ 'learning_rate': 0.05,
+ 'num_leaves': 31,
+ 'max_depth': -1,
+ 'min_data_in_leaf': 20,
+ 'feature_fraction': 0.8,
+ 'bagging_fraction': 0.8,
+ 'bagging_freq': 5,
+ 'lambda_l1': 0.0,
+ 'lambda_l2': 1.0,
+ 'is_unbalance': False  # use scale_pos_weight instead if needed
+}
+
+	•	Use scale_pos_weight = n_neg / n_pos if the positive class (finalists) is very rare.
+
+C. Hyperparameter search
+	•	Use Optuna or RandomizedSearchCV over these ranges:
+	•	num_leaves: [16, 32, 64, 128]
+	•	learning_rate: [0.01, 0.02, 0.05, 0.1]
+	•	min_data_in_leaf: [5, 10, 20, 50]
+	•	feature_fraction: [0.6, 0.7, 0.8, 1.0]
+	•	bagging_fraction: [0.6, 0.8, 1.0]
+	•	lambda_l1, lambda_l2: [0, 0.1, 1.0]
+	•	max_depth: [-1, 6, 8, 12]
+
+Use 5-fold GroupKFold for search and early_stopping_rounds=50.
+
+⸻
+
+6 — Evaluation metrics — exact definitions, use-cases & thresholds
+
+(These are the metrics you must report — I list formula, what it measures, and recommended threshold or guidance.)
+
+I’ll cite reference material for metric selection and calibration practices.  ￼
+
+Primary metrics (probabilistic & ranking)
+	1.	ROC-AUC (Area Under ROC Curve)
+	•	Definition: area under the ROC curve (TPR vs FPR across thresholds).
+	•	Use: global ranking ability of model (probabilities).
+	•	Good: AUC ≥ 0.8 is strong for this domain; ≥0.9 exceptional (depends on dataset).
+	•	Compute with sklearn.metrics.roc_auc_score.
+	2.	Brier Score (probability calibration)
+	•	Definition: mean squared error between predicted probability and actual outcome.
+	•	Use: how well-calibrated probabilities are; important for simulations. Lower is better (0 is perfect).  ￼
+	3.	Log Loss (cross-entropy)
+	•	Definition: negative log-likelihood of true labels. Lower is better. Useful to tune probabilistic models.
+
+Classification metrics (at chosen threshold; often 0.5 or tuned)
+	4.	Accuracy = (TP+TN)/Total
+	•	Use: quick snapshot; can be misleading when classes imbalanced.
+	5.	Precision (Positive Predictive Value) = TP / (TP + FP)
+	•	Use: when false positives are costly (e.g., claiming a team will reach final when it won’t).
+	6.	Recall (Sensitivity) = TP / (TP + FN)
+	•	Use: when false negatives are costly (missing an actual finalist).
+	7.	F1 Score = harmonic mean(Precision, Recall)
+	•	Use: balanced single-number metric.
+	8.	Precision-Recall AUC (PR-AUC)
+	•	Use: more informative than ROC-AUC for heavily imbalanced positives, as finalists are rare. Consider this carefully.  ￼
+
+Calibration & reliability
+	9.	Calibration curve / Reliability diagram
+	•	Plot predicted probability bins vs observed frequency.
+	•	If miscalibrated, use CalibratedClassifierCV (isotonic or Platt scaling).
+	10.	Brier score decomposition (optional): reliability, resolution, uncertainty.
+
+Practical thresholds & monitoring
+	•	Choose decision threshold by optimizing for business objective (max F1, minimize false negatives, or maximize precision at required recall). For finalist prediction, you may choose threshold that gives high recall to avoid missing true finalists (e.g., target recall ≥ 0.85) while keeping precision acceptable.
+	•	Report metrics with confidence intervals via bootstrap.
+
+⸻
+
+7 — Explainability (SHAP) & feature importance
+	•	Use SHAP (TreeExplainer) for LightGBM to produce:
+	•	Global: summary plot (feature importance & effect direction), top-15 features.  ￼
+	•	Local: force plots for a team (why model gave X% chance)
+	•	Dependence plots: show non-linear feature interactions.
+	•	Also compute permutation importance on hold-out for robustness.
+
+Deliverable: docs/figures/shap_summary.png + docs/explanations/team_X_shap.html for example teams.
+
+⸻
+
+8 — Tournament simulation (Monte Carlo) — method
+
+If using match-level probability model:
+	1.	For every match in tournament bracket, compute P(home win), P(draw), P(away win) using the model.
+	2.	Convert to match outcomes by sampling: run N simulations (e.g., 5,000–20,000). For each simulation, advance winners (apply tie-break rules / penalties using tie-break model or sampling).
+	3.	Aggregate frequencies: finalists frequency = number of simulations where team reached final / N.
+	4.	Use these probabilities for “Home top 2 finalists” and show 95% CI via bootstrap.
+
+Notes: Calibration matters — use calibrated probabilities (Brier low) before simulating. Use Monte Carlo seeding and store results.
+
+⸻
+
+9 — UI / App behavior (fields, visuals, data flow)
+
+I’ll specify each tab and every field / metric to show. Use Streamlit; split into modular components.
+
+Home — Finalists & Top 10
+	•	Top area: App name, LightGBM version, last_data_refresh timestamp.
+	•	Predicted Finalists (cards) — show 2 cards:
+	•	team_name, flag, probability_to_be_finalist (%), 95% CI, top_shap_contributors (3 features).
+	•	Top 10 table (sortable): columns: rank_by_prob, team_name, probability, fifa_rank, avg_goals_90, xg_for_90, squad_value_m€, confederation.
+	•	Simulation Settings: N simulations (default 5000), random_seed.
+	•	Simulation bar chart: top 20 teams by finalist frequency.
+	•	Export buttons: CSV / PNG of charts.
+
+Fixtures — schedule & climate
+	•	Filters: date_range_picker, competition_dropdown, team_filter, venue_search
+	•	Main table columns: date_local, kickoff_time_local, home_flag, home_team, away_flag, away_team, venue, city, country, climate_summary, temp_c, humid_pct, status, prob_home_win, prob_draw, prob_away_win.
+	•	Match card on click: head-to-head last 5 matches, xG comparison, predicted probabilities, SHAP drivers for those teams during fixture.
+	•	Auto-refresh: toggle (interval default 15 mins), shows API rate usage.
+
+Compare — Team vs Team
+	•	Inputs: Team A dropdown, Team B dropdown, date_context (use latest snapshot)
+	•	Outputs:
+	•	Outcome probabilities: P(A win), P(draw), P(B win) with icons and percentages.
+	•	Form comparison: last 10 matches W/D/L counts, avg goals, avg xG.
+	•	Radar chart: normalized features (attack, defense, possession, squad_value, experience).
+	•	Head2Head table: last 10 meetings with results.
+	•	Local explanation: SHAP waterfall showing which features tipped probability in A’s favor.
+
+Stats — Team & Player
+	•	Team search → Team overview card with:
+	•	FIFA rank (value + delta), ELO (if available), avg_goals_for_90, avg_g_against_90, xg_for_90, squad_value_m€, avg_age, injuries_count, coach_name.
+	•	Player table: columns: name, position, goals, assists, minutes, rating, club, market_value_m€.
+	•	Time series: goals per match line plot (Matplotlib/Plotly), feature trend over time.
+	•	Download CSV.
+
+Evaluation — Model metrics & calibration
+	•	Metrics panel: show the following (for each model):
+	•	ROC-AUC, PR-AUC, Accuracy, Precision, Recall, F1, LogLoss, Brier Score
+	•	Also Confusion Matrix (heatmap), ROC Curve, Precision-Recall Curve
+	•	Calibration plot: reliability diagram; numeric Brier score and calibration error value.
+	•	Feature importance: bar chart Top 15 (gain & permutation); SHAP summary.
+	•	Model card: training date, dataset snapshot, CV folds, hyperparams best, model size, artifact checksum.
+
+⸻
+
+10 — Backend & orchestration
+
+Services:
+	•	data-service (Python): fetchers for APIs + scrapers; writes to data/raw/. Contains connectors for API-Football (rate-limited), football-data CSV ingestion, and FBref scraping.
+	•	etl-service: transforms raw → processed features; stores snapshots into DB (processed.team_features_snapshot).
+	•	model-service: trains LightGBM using ml_pipeline/, serves predictions (load model file). Exposes REST endpoints:
+	•	POST /predict_finalists — returns top K finishers with probs.
+	•	POST /predict_match — returns match outcome probabilities for two teams.
+	•	GET /model/metrics — latest evaluation metrics JSON.
+	•	app: Streamlit UI calls model-service and data-service REST endpoints.
+
+Caching & rate-limiting:
+	•	Cache API responses (Redis or local file) for 10–60 minutes depending on endpoint.
+	•	Keep API key in .env and monitor usage; show API calls remaining in the UI header.
+
+Jobs:
+	•	cron/airflow job etl.daily: run nightly to pull latest fixtures & ranks, update features.
+	•	on-demand: Refresh Data button triggers etl/refresh with progress bar.
+
+⸻
+
+11 — Monitoring, Logging, & quality checks
+
+Monitoring
+	•	Data pipeline health: track counts of teams, fixtures pulled, last successful run timestamp.
+	•	Model drift: monitor key feature distribution changes (population stability index) and AUC over time on rolling holdout.
+	•	Prediction distribution: monitor average finalist probability and entropy; alert on sudden shifts.
+
+Logs
+	•	Centralized logs (timestamped) for API errors, ETL errors, model training runs (hyperparams & CV scores).
+
+Tests & QA
+	•	Unit tests: for each ETL function & feature generator (pytest).
+	•	Integration tests: fetch a sample fixture and run full pipeline end-to-end.
+	•	Model test: assert roc_auc_test > baseline_value before promoting model to production.
+
+⸻
+
+12 — Model reproducibility & artifacts
+	•	Save ml_pipeline/models/lightgbm_final.pkl and ml_pipeline/preprocessor.joblib.
+	•	Save training configuration: ml_pipeline/training_log.json with CV folds, best params, metrics, git commit hash.
+	•	Use dvc (optional) or store dataset snapshots named dataset_YYYYMMDD.parquet.
+
+⸻
+
+13 — Scalability & deployment
+	•	Use Docker for all services.
+	•	Host on Render / Railway / Heroku for quick demo; use AWS/GCP for production.
+	•	Streamlit can be deployed easily; behind it, serve model-service on FastAPI.
+
+⸻
+
+14 — Security & Legal
+	•	API keys: store in environment vars; never commit to git.
+	•	Scraping: respect robots.txt and site-specific TOS. For FBref/Understat, prefer their CSV or public endpoints if available.
+	•	Privacy: no PII used.
+
+⸻
+
+15 — Exact metrics to display in UI & docs (for grading)
+
+For evaluation report and UI, compute and show the following exact metrics for each model (LightGBM, RF, LR):
+	1.	ROC-AUC (float, 3 decimals) — roc_auc_score(y_true, y_pred_proba)
+	2.	PR-AUC (float, 3 decimals) — average_precision_score(y_true, y_pred_proba)
+	3.	Accuracy (float) — default threshold 0.5; also show best threshold accuracy.
+	4.	Precision, Recall, F1 score — show both for threshold 0.5 and threshold optimized for max F1.
+	5.	Log loss — log_loss(y_true, y_pred_proba)
+	6.	Brier score — brier_score_loss(y_true, y_pred_proba) (averaged)
+	7.	Calibration table: for bins [0.0-0.1, 0.1-0.2, …, 0.9-1.0], show: mean_pred_prob, actual_freq, count for each bin.
+	8.	Confusion matrix (2×2 numbers + normalized percentages).
+	9.	Top 15 feature importances (value & % contribution by gain).
+	10.	SHAP mean abs value for top 15 features.
+
+Also report:
+	•	Class distribution (n_pos, n_neg) in training & test sets.
+	•	Cross-validation mean & std for ROC-AUC (5 folds).
+	•	Bootstrap 95% CI for main metric (ROC-AUC).
+
+(References & reading for metrics and calibration: Neptune metric guide, Machine Learning Mastery ROC/PR tutorial, Brier calibration guides.)  ￼
+
+⸻
+
+16 — Error cases & fallback logic
+	•	If API-Football rate-limited / down: use last cached fixtures and notify user (UI banner).
+	•	If advanced features (xG) missing for a team: impute with league median + is_missing_xg flag.
+	•	If qualifier list incomplete (before March 2026): two modes:
+	•	Dynamic mode — only predict using currently qualified + master team list (preferred).
+	•	Simulated mode — fill remaining spots with top-100+historical heuristic (user can select method: ranking_based / historical_frequency). Keep UI note that these are simulated entrants.
+
+⸻
+
+17 — Deliverables (exact files to include)
+	•	README.md with setup & run commands
+	•	requirements.txt
+	•	api_collector/ modules (API-Football client + football-data csv loader)
+	•	scrapers/ (FBref, Transfermarkt) — documented & respectful of robots.txt
+	•	etl/transform_features.py + etl/update_pipeline.py
+	•	ml_pipeline/modeling_lightgbm.ipynb (fully commented: preprocessing, CV, tuning, evaluation, SHAP)
+	•	ml_pipeline/models/lightgbm_final.pkl + preprocessor.joblib
+	•	app/streamlit_app.py + app/components/* (home, fixtures, compare, stats, evaluation)
+	•	docs/report.pdf — 2-page evaluation + 1-page feature interpretation + screenshots
+	•	tests/ pytest unit and integration tests
+
+⸻
+
+18 — Quick implementation checklist (to present to team / teacher)
+	1.	Register API keys (API-Football, optional Weather).
+	2.	Build master team list & canonical IDs.
+	3.	Ingest football-data.co.uk CSVs for history.  ￼
+	4.	Implement feature generator (rolling windows, squad features).
+	5.	Train LightGBM baseline; compute AUC, Brier, PR-AUC. Tune hyperparams.
+	6.	Build SHAP explainability notebook.  ￼
+	7.	Add Streamlit UI implementing tabs described above.
+	8.	Add monitoring & tests.
+	9.	Prepare docs & present to Shivaprasad Sir.
+
+⸻
+
+19 — References (most important)
+	•	API-Football docs / pricing & free plan (API endpoints for fixtures & teams).  ￼
+	•	Football-data.co.uk historical CSV data (results & odds).  ￼
+	•	Binary classification metrics & guidance (ROC-AUC, PR-AUC, calibration).  ￼
+	•	Brier Score & calibration best practices.  ￼
+	•	SHAP documentation and LightGBM integration for explainability.  ￼
+
+⸻
+
+Next step (I can do now)
+
+I can immediately generate one of the following (pick one; I’ll produce it now in full):
+	•	The complete Streamlit app scaffold (all tabs) with placeholder/data-fetch functions you can plug your API key into.
+	•	The LightGBM training notebook (preprocessing → training → CV → evaluation + SHAP).
+	•	The ETL feature generator script (etl/transform_features.py) that reads football-data csvs + API responses and outputs team_features_snapshot.parquet.
+
+Tell me which artifact you want now and I’ll produce it (ready-to-run code and comments).

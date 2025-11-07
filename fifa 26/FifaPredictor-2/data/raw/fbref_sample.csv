@@ -1,0 +1,4 @@
+team_name,xg_for_90,xg_against_90,shots_per_90,sot_per_90,possession_pct,pass_accuracy,progressive_passes_per_90,data_source,last_updated,error
+Brazil,,,,,,,,fbref,2025-11-08 02:52:53.123361,403 Client Error: Forbidden for url: https://fbref.com/en/search/search.fcgi?search=Brazil
+Argentina,,,,,,,,fbref,2025-11-08 02:52:57.317922,403 Client Error: Forbidden for url: https://fbref.com/en/search/search.fcgi?search=Argentina
+France,,,,,,,,fbref,2025-11-08 02:53:01.525538,403 Client Error: Forbidden for url: https://fbref.com/en/search/search.fcgi?search=France
